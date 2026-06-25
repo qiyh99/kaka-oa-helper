@@ -435,13 +435,21 @@ def _candidate_cookie_dbs(extra_roots=None):
     return dbs
 
 
+def _copy_db(db_path, tmp):
+    """复制 Cookies 及其 WAL/SHM 旁文件到临时目录（微信运行时新 cookie 在 -wal 里）。"""
+    dst = os.path.join(tmp, "Cookies")
+    shutil.copy(db_path, dst)
+    for suffix in ("-wal", "-shm"):
+        if os.path.exists(db_path + suffix):
+            shutil.copy(db_path + suffix, dst + suffix)
+    return dst
+
+
 def _query_token_enc(db_path):
     """从 cookie 库取出 kk.xwtec.net 的 tokenId7 密文（容忍 host 带不带点）。"""
     tmp = tempfile.mkdtemp()
-    dst = os.path.join(tmp, "c.db")
     try:
-        shutil.copy(db_path, dst)
-        con = sqlite3.connect(dst)
+        con = sqlite3.connect(_copy_db(db_path, tmp))
         try:
             row = con.execute(
                 "SELECT encrypted_value FROM cookies "

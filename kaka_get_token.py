@@ -105,12 +105,20 @@ def _candidate_cookie_dbs(extra_roots=None):
     return dbs
 
 
+def _copy_db(db_path, tmp):
+    """复制 Cookies 及 WAL/SHM 旁文件（微信运行时新 cookie 在 -wal 里）。"""
+    dst = os.path.join(tmp, "Cookies")
+    shutil.copy(db_path, dst)
+    for suffix in ("-wal", "-shm"):
+        if os.path.exists(db_path + suffix):
+            shutil.copy(db_path + suffix, dst + suffix)
+    return dst
+
+
 def _query_token_enc(db_path):
     tmp = tempfile.mkdtemp()
-    dst = os.path.join(tmp, "c.db")
     try:
-        shutil.copy(db_path, dst)
-        con = sqlite3.connect(dst)
+        con = sqlite3.connect(_copy_db(db_path, tmp))
         try:
             row = con.execute(
                 "SELECT encrypted_value FROM cookies "
@@ -159,10 +167,8 @@ def copy_to_clipboard(text):
 def _scan_db(db_path):
     """返回 (是否有tokenId7, 含xwtec的host列表, 总cookie数)。"""
     tmp = tempfile.mkdtemp()
-    dst = os.path.join(tmp, "c.db")
     try:
-        shutil.copy(db_path, dst)
-        con = sqlite3.connect(dst)
+        con = sqlite3.connect(_copy_db(db_path, tmp))
         try:
             xw = con.execute("SELECT DISTINCT host_key,name FROM cookies "
                              "WHERE host_key LIKE '%xwtec%'").fetchall()
