@@ -35,7 +35,7 @@ from flask import Flask, request, jsonify, Response
 # 配置
 # ----------------------------------------------------------------------------
 BASE_NET = "https://kk.xwtec.net"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 PORT = 5666
 MONTHS = 3                          # 统计窗口 & 加班作废周期（月）
 EXPIRE_SOON_DAYS = 7                # “即将到期”提醒阈值（天）
@@ -858,9 +858,10 @@ PAGE_HTML = r"""<!DOCTYPE html>
       <div><div class="muted">工资(基本+满绩效)</div><input id="salaryWage" type="number" style="width:130px" placeholder="如 10000" oninput="calcSalary()"></div>
       <div><div class="muted">额外补贴</div><input id="salarySub" type="number" style="width:110px" placeholder="如 500" oninput="calcSalary()"></div>
       <div><div class="muted">绩效分</div><input id="salaryGrade" type="number" style="width:90px" placeholder="最新月" oninput="calcSalary()"></div>
+      <div><div class="muted">专项附加扣除(月)</div><input id="salarySpecial" type="number" style="width:120px" placeholder="房租/赡养等 如 0" oninput="calcSalary()"></div>
     </div>
     <div id="salaryBody" class="muted" style="margin-top:12px">输入工资后自动计算。</div>
-    <div class="muted" style="margin-top:8px">规则：工资含基本(80%)+满绩效(20%)，绩效工资=工资×20%×绩效分%；五险(成都员工)养老8%/医疗2%/失业0.4%按工资计；公积金=工资一半×8%。绩效分默认取最新月绩效，可改；工资/补贴只存在你本机浏览器。</div>
+    <div class="muted" style="margin-top:8px">规则：工资含基本(80%)+满绩效(20%)，绩效工资=工资×20%×绩效分%；五险(成都员工)养老8%/医疗2%/失业0.4%按工资计；公积金=工资一半×8%。个税=按月速算（应发−五险一金−5000−专项附加，套月度税率表）。绩效分默认取最新月绩效，可改；数据只存你本机浏览器。<br>注：个税为按月简易测算（假设月薪稳定）；实际采用累计预扣法，年初扣得少、年末多，全年汇总一致。</div>
   </div>
 </div>
 
@@ -907,27 +908,40 @@ function restoreSalary(){
     const s = JSON.parse(localStorage.getItem('kaka_salary')||'{}');
     if($('#salaryWage').value==='' && s.wage) $('#salaryWage').value = s.wage;
     if($('#salarySub').value==='' && s.sub) $('#salarySub').value = s.sub;
+    if($('#salarySpecial').value==='' && s.special) $('#salarySpecial').value = s.special;
     if($('#salaryGrade').value===''){
       $('#salaryGrade').value = (s.grade!=null && s.grade!=='') ? s.grade : (LATEST_GRADE!=null?LATEST_GRADE:'');
     }
   }catch(e){}
   calcSalary();
 }
+function incomeTax(taxable){
+  // 月度速算：应纳税所得额 -> 个税
+  if(taxable<=0) return 0;
+  const b=[[0,0.03,0],[3000,0.10,210],[12000,0.20,1410],[25000,0.25,2660],[35000,0.30,4410],[55000,0.35,7160],[80000,0.45,15160]];
+  let rate=0.03, qd=0;
+  for(const [lo,r,q] of b){ if(taxable>lo){ rate=r; qd=q; } }
+  return Math.max(0, taxable*rate - qd);
+}
 function calcSalary(){
   const wage = parseFloat($('#salaryWage').value)||0;
   const sub = parseFloat($('#salarySub').value)||0;
+  const special = parseFloat($('#salarySpecial').value)||0;
   let g = parseFloat($('#salaryGrade').value); if(isNaN(g)) g = 100;
-  try{ localStorage.setItem('kaka_salary', JSON.stringify({wage:$('#salaryWage').value, sub:$('#salarySub').value, grade:$('#salaryGrade').value})); }catch(e){}
+  try{ localStorage.setItem('kaka_salary', JSON.stringify({wage:$('#salaryWage').value, sub:$('#salarySub').value, grade:$('#salaryGrade').value, special:$('#salarySpecial').value})); }catch(e){}
   if(wage<=0){ $('#salaryBody').innerHTML = '<span class="muted">输入工资后自动计算。</span>'; return; }
   const base = wage*0.8, perf = wage*0.2*(g/100), gross = base+perf+sub;
   const ylao = wage*0.08, yliao = wage*0.02, shiye = wage*0.004, gjj = wage*0.5*0.08;
   const wsj = ylao+yliao+shiye+gjj;
-  const net = gross - wsj;
+  const taxable = Math.max(0, gross - wsj - 5000 - special);
+  const tax = incomeTax(taxable);
+  const net = gross - wsj - tax;
   $('#salaryBody').innerHTML =
     '<div class="cards">'
       + statCard('应发合计', gross, '元')
       + statCard('五险一金', wsj, '元', 'bad')
-      + statCard('税前到手', net, '元', 'ok')
+      + statCard('个税', tax, '元', 'bad')
+      + statCard('实发到手', net, '元', 'ok')
     + '</div>'
     + '<table style="margin-top:10px">'
       + srow('基本工资 (80%)', base)
@@ -939,7 +953,11 @@ function calcSalary(){
       + srow('失业保险 0.4%', -shiye)
       + srow('公积金 (工资一半×8%)', -gjj)
       + srow('五险一金合计', -wsj, true)
-      + srow('税前到手（未计个税）', net, true)
+      + srow('减除费用(起征点)', -5000)
+      + srow('专项附加扣除', -special)
+      + srow('应纳税所得额', taxable, true)
+      + srow('个人所得税', -tax)
+      + srow('实发到手', net, true)
     + '</table>';
 }
 
