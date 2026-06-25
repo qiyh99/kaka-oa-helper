@@ -45,9 +45,10 @@ UA_WECHAT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
              "MicroMessenger/7.0.20.1781(0x6700143B) WindowsWechat(0x63090a13) "
              "UnifiedPCWindowsWechat(0xf2541923) XWEB/19841 Flue")
 
-# 加班=JBSQ(JB)  调休=JBTX(TX)
+# 加班=JBSQ(JB)  调休=JBTX(TX)  年假=NXJQ(NJ)
 OVERTIME_PREFIXES = ("REQ_JBSQ",)
 TIAOXIU_PREFIXES = ("REQ_JBTX",)
+ANNUAL_PREFIXES = ("REQ_NXJQ",)
 FLAG_DONE = 4
 FLAG_LABELS = {4: "已通过", 2: "已撤回"}
 
@@ -59,7 +60,7 @@ LOCK = threading.Lock()
 
 
 def new_ctx():
-    return {"tokenId7": None, "name": None}
+    return {"tokenId7": None, "name": None, "seniority": None}
 
 
 def load_sessions():
@@ -69,7 +70,7 @@ def load_sessions():
         data = json.load(open(SESSIONS_FILE, encoding="utf-8"))
         for sid, c in data.items():
             ctx = new_ctx()
-            ctx.update({k: c.get(k) for k in ("tokenId7", "name")})
+            ctx.update({k: c.get(k) for k in ("tokenId7", "name", "seniority")})
             SESSIONS[sid] = ctx
     except Exception:
         pass
@@ -77,7 +78,7 @@ def load_sessions():
 
 def save_sessions():
     with LOCK:
-        dump = {sid: {k: c.get(k) for k in ("tokenId7", "name")}
+        dump = {sid: {k: c.get(k) for k in ("tokenId7", "name", "seniority")}
                 for sid, c in SESSIONS.items() if c.get("tokenId7")}
     with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
         json.dump(dump, f, ensure_ascii=False, indent=2)
@@ -302,6 +303,101 @@ def build_report(ctx):
                     "remaining": valid_remaining, "voidHours": void_hours,
                     "expiringSoon": expiring_soon, "expiringDays": EXPIRE_SOON_DAYS},
         "expiringList": expiring_list,
+    }
+
+
+def annual_entitlement(years):
+    """按《职工带薪年休假条例》：满1不满10→5天，满10不满20→10天，满20→15天。"""
+    if years is None:
+        return None
+    if years < 1:
+        return 0
+    if years < 10:
+        return 5
+    if years < 20:
+        return 10
+    return 15
+
+
+def auto_seniority(ctx):
+    """用绩效最早月份粗略推算（本公司）工龄，单位：年。取不到返回 None。"""
+    try:
+        perf = fetch_perf(ctx)
+        months = [x["month"] for x in perf.get("forms", []) if x.get("month")]
+        if not months:
+            return None
+        e = min(months)               # 'YYYY-MM'
+        start = date(int(e[:4]), int(e[5:7]), 1)
+        return round((date.today() - start).days / 365.25, 1)
+    except Exception:
+        return None
+
+
+def _days_from_fields(fields):
+    """年假详情里的“请假时长 = N 天”取出 N。"""
+    for label, val in fields.items():
+        if "时长" in label or "天数" in label:
+            m = re.search(r"[\d.]+", val or "")
+            if m:
+                return float(m.group())
+    return 0.0
+
+
+def compute_annual(ctx, seniority=None):
+    """近两年（去年+今年）年假使用情况 + 剩余年假（去年可结转一年）。"""
+    session = net_session(ctx)
+    today = date.today()
+    cutoff = date(today.year - 1, 1, 1)     # 覆盖去年、今年两个自然年
+    records, _ = dedupe(fetch_oa_list(session, cutoff))
+
+    rows = []
+    for it in records:
+        if not (it.get("flowId") or "").startswith(ANNUAL_PREFIXES):
+            continue
+        fields = fetch_oa_detail(session, it.get("flowId"), it.get("flowInsId"))
+        days = _days_from_fields(fields)
+        try:
+            ev = parse_dt(fields.get("开始时间") or it.get("applyTime"))
+        except Exception:
+            ev = parse_dt(it.get("applyTime"))
+        rows.append({
+            "sn": it.get("flowInsSN", ""),
+            "flag": it.get("flowFlag"),
+            "status": FLAG_LABELS.get(it.get("flowFlag"), f"其他({it.get('flowFlag')})"),
+            "date": fmt_date(ev),
+            "_year": ev.year,
+            "days": round(days, 1),
+        })
+    rows.sort(key=lambda x: x["date"], reverse=True)
+
+    auto = seniority is None
+    if auto:
+        seniority = auto_seniority(ctx)
+    entitlement = annual_entitlement(seniority)
+
+    used_this = round(sum(r["days"] for r in rows
+                          if r["flag"] == FLAG_DONE and r["_year"] == today.year), 1)
+    used_last = round(sum(r["days"] for r in rows
+                          if r["flag"] == FLAG_DONE and r["_year"] == today.year - 1), 1)
+    if entitlement is None:
+        last_left = this_left = remaining = None
+    else:
+        last_left = max(0.0, entitlement - used_last)   # 去年结转（今年内有效）
+        this_left = max(0.0, entitlement - used_this)
+        remaining = round(last_left + this_left, 1)
+
+    return {
+        "seniority": seniority,
+        "seniorityAuto": auto,
+        "entitlement": entitlement,
+        "thisYear": today.year,
+        "lastYear": today.year - 1,
+        "usedThisYear": used_this,
+        "usedLastYear": used_last,
+        "lastYearLeft": last_left,
+        "thisYearLeft": this_left,
+        "remaining": remaining,
+        "rows": [{k: v for k, v in r.items() if not k.startswith("_")} for r in rows],
     }
 
 
@@ -609,6 +705,25 @@ def api_perf():
         return jsonify({"ok": False, "error": str(e)})
 
 
+@app.get("/api/annual")
+def api_annual():
+    """年假：?years=工龄（不传则按绩效推算；传了会记住）。"""
+    ctx = current_ctx()
+    if ctx is None or not ctx.get("tokenId7"):
+        return jsonify({"ok": False, "error": "未获取登录态"})
+    years = request.args.get("years", "").strip()
+    if years:
+        try:
+            ctx["seniority"] = float(years)
+            save_sessions()
+        except ValueError:
+            return jsonify({"ok": False, "error": "工龄请填数字（年）"})
+    try:
+        return jsonify({"ok": True, "data": compute_annual(ctx, ctx.get("seniority"))})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
 @app.post("/api/logout")
 def api_logout():
     sid = request.cookies.get("sid")
@@ -714,6 +829,20 @@ PAGE_HTML = r"""<!DOCTYPE html>
     <div class="card"><h2>调休申请（近{MONTHS}个月）</h2><div id="txTable"></div></div>
   </div>
 
+  <!-- 年假 -->
+  <div id="annual" class="card hide">
+    <h2>年假 <span class="muted" id="annualSub"></span></h2>
+    <div class="cards" id="annualCards"></div>
+    <div class="row" style="margin-top:10px">
+      <span class="muted">工龄(年)：</span>
+      <input id="seniorityInput" style="width:90px" placeholder="如 3"/>
+      <button class="ghost" onclick="recalcAnnual()">重新计算</button>
+      <span class="muted" id="annualHint"></span>
+    </div>
+    <div class="muted" style="margin-top:8px">规则：法定年假按工龄 满1年5天 / 满10年10天 / 满20年15天；上一年没休的可结转到今年用，再不休作废（故查近两年）。工龄默认按绩效推算，可手填覆盖。</div>
+    <div id="annualTable" style="margin-top:8px"></div>
+  </div>
+
   <!-- 绩效 -->
   <div id="perf" class="card hide">
     <h2>个人绩效</h2>
@@ -748,8 +877,9 @@ function onReady(name){
   $('#setupCard').classList.add('hide');
   $('#who').innerHTML = '已就绪：' + (name||'') + ' · <a href="#" class="link" onclick="logout();return false">退出</a>';
   $('#dash').classList.remove('hide');
+  $('#annual').classList.remove('hide');
   $('#perf').classList.remove('hide');
-  loadReport(); loadPerf();
+  loadReport(); loadAnnual(); loadPerf();
 }
 
 async function autoToken(){
@@ -813,6 +943,28 @@ async function loadReport(){
     {t:'状态',render:statusPill}, {t:'时长',r:true,render:r=>fx(r.hours)+'h'}
   ], d.tiaoxiu);
 }
+
+async function loadAnnual(years){
+  $('#annualCards').innerHTML = '<div class="muted">加载中…</div>';
+  const u = '/api/annual' + (years!=null && years!=='' ? ('?years='+encodeURIComponent(years)) : '');
+  const r = await jget(u);
+  if(!r.ok){ $('#annualCards').innerHTML = '<div class="muted">加载失败：'+r.error+'</div>'; return; }
+  const d = r.data;
+  $('#annualSub').textContent = '工龄约 ' + (d.seniority==null?'—':d.seniority) + ' 年'
+    + (d.seniorityAuto?'（按绩效推算，可改）':'（手填）') + ' · 每年应休 '
+    + (d.entitlement==null?'—':d.entitlement) + ' 天';
+  $('#annualCards').innerHTML =
+      statCard('剩余年假', d.remaining, '天', 'ok')
+    + statCard(d.thisYear+' 已休', d.usedThisYear, '天')
+    + statCard(d.lastYear+' 已休', d.usedLastYear, '天')
+    + statCard('去年结转剩余', d.lastYearLeft, '天', d.lastYearLeft>0?'warn':'');
+  if($('#seniorityInput').value==='' && d.seniority!=null) $('#seniorityInput').value = d.seniority;
+  $('#annualTable').innerHTML = table([
+    {t:'年假日期',k:'date'}, {t:'单号',k:'sn'}, {t:'状态',render:statusPill},
+    {t:'天数',r:true,render:r=>fx(r.days)+'天'}
+  ], d.rows);
+}
+function recalcAnnual(){ loadAnnual($('#seniorityInput').value.trim()); }
 
 async function loadPerf(){
   $('#perfBody').innerHTML = '加载中…';
