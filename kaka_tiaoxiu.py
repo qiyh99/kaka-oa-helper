@@ -35,6 +35,7 @@ from flask import Flask, request, jsonify, Response
 # 配置
 # ----------------------------------------------------------------------------
 BASE_NET = "https://kk.xwtec.net"
+APP_VERSION = "1.3.0"
 PORT = 5666
 MONTHS = 3                          # 统计窗口 & 加班作废周期（月）
 EXPIRE_SOON_DAYS = 7                # “即将到期”提醒阈值（天）
@@ -771,6 +772,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
   a.link{color:var(--acc);text-decoration:none}
   .by{font-size:12px;font-weight:400;color:var(--mut);text-decoration:none}
   .by:hover{color:var(--acc)}
+  .ver{font-size:12px;font-weight:400;color:var(--mut)}
   .quit{float:right;background:#222a47;color:var(--mut);font-size:12px;padding:6px 12px}
   .quit:hover{background:#3a2030;color:var(--bad)}
   .hide{display:none}
@@ -780,7 +782,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
 <body>
 <div class="wrap">
   <button class="quit" onclick="quitApp()">关闭程序</button>
-  <h1>咔咔 OA 助手 <a class="by" href="GITHUB_URL" target="_blank" rel="noopener">by qiyh99</a></h1>
+  <h1>咔咔 OA 助手 <span class="ver">vAPP_VERSION</span> <a class="by" href="GITHUB_URL" target="_blank" rel="noopener">by qiyh99</a></h1>
   <div class="sub" id="who">全自动 · 读取本机微信登录态，无需扫码/账号</div>
 
   <!-- 登录态获取 -->
@@ -1047,7 +1049,7 @@ async function loadPerf(){
 boot();
 </script>
 </body>
-</html>""".replace("{MONTHS}", str(MONTHS)).replace("GITHUB_URL", GITHUB_URL)
+</html>""".replace("{MONTHS}", str(MONTHS)).replace("GITHUB_URL", GITHUB_URL).replace("APP_VERSION", APP_VERSION)
 
 
 def local_ip():

@@ -16,7 +16,7 @@
 ## 🚀 使用
 
 ### 方式一：下载 exe（推荐，免装环境）
-1. 到 [Releases](https://github.com/qiyh99/kaka-oa-helper/releases) 下载 `kaka_oa.exe`。
+1. 到 [最新 Release](https://github.com/qiyh99/kaka-oa-helper/releases/latest) 下载 `kaka_oa.exe`（版本变更见 [CHANGELOG](CHANGELOG.md)）。
 2. 先用**电脑版微信**打开过一次绩效 / OA 页面（让微信存下登录态）。
 3. 双击 `kaka_oa.exe` —— 浏览器自动弹出，直接显示你自己的数据。
 4. 用完点页面右上角「**关闭程序**」即可退出。
