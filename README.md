@@ -40,7 +40,14 @@ python kaka_tiaoxiu.py
 
 每人在**自己电脑**上运行（读各自微信），即各自全自动、互不影响。
 
-如果某人微信版本特殊、自动读取失败，可运行随附的 `kaka_get_token.py` 拿到自己的 `tokenId7` 粘贴到网页里。
+## ❓ 读不到登录态 / 检测不到目录
+
+1. 先确认用**电脑版微信**打开过一次绩效 / OA 页（让微信存下登录态）。
+2. 页面会出现「微信目录」输入框，填进去再点「从该目录读取」。默认目录直接复制 `%APPDATA%\Tencent` 即可。常见完整位置：
+   - 新版微信：`C:\Users\用户名\AppData\Roaming\Tencent\xwechat\radium\web\profiles`
+   - 旧版微信：`C:\Users\用户名\AppData\Roaming\Tencent\WeChat\xweb`
+   - 也可以直接填那个名为 `Cookies` 的文件路径。
+3. 实在不行：运行 `kaka_get_token.py`（可带目录参数 `python kaka_get_token.py "%APPDATA%\Tencent"`）拿到 token，粘到网页最下面的输入框。
 
 ## 🔨 自行打包
 

@@ -395,17 +395,25 @@ _SKIP_DIRS = {"msg", "filestorage", "backup", "cache", "cachefile", "gpucache",
               "crashpad", "blob_storage", "code cache", "dawncache", "shadercache"}
 
 
-def _candidate_cookie_dbs():
-    """递归发现本机微信所有 Chromium cookie 库（不依赖固定版本路径）。"""
+def _candidate_cookie_dbs(extra_roots=None):
+    """递归发现本机微信所有 Chromium cookie 库（不依赖固定版本路径）。
+    extra_roots：用户手动指定的目录或 Cookies 文件路径（支持 %APPDATA% / ~）。"""
     home = os.path.expanduser("~")
-    roots = []
-    for base in (os.environ.get("APPDATA"), os.environ.get("LOCALAPPDATA"),
-                 os.path.join(home, "AppData", "Roaming"),
-                 os.path.join(home, "AppData", "Local")):
+    bases = [os.environ.get("APPDATA"), os.environ.get("LOCALAPPDATA"),
+             os.path.join(home, "AppData", "Roaming"),
+             os.path.join(home, "AppData", "Local")]
+    roots, direct = [], []
+    for base in bases:
         if base:
-            for brand in ("Tencent",):
+            for brand in ("Tencent", "WeChat", "Weixin", "xwechat"):
                 roots.append(os.path.join(base, brand))
-    dbs, seen_root = [], set()
+    for r in (extra_roots or []):
+        p = os.path.normpath(os.path.expandvars(os.path.expanduser(str(r).strip().strip('"'))))
+        if os.path.isfile(p):
+            direct.append(p)
+        elif os.path.isdir(p):
+            roots.append(p)
+    dbs, seen_root = list(direct), set()
     for root in roots:
         root = os.path.normpath(root)
         if not os.path.isdir(root) or root in seen_root:
@@ -443,12 +451,8 @@ def _query_token_enc(db_path):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def read_wechat_tokenid7():
-    """自动发现并解出本机微信里 kk.xwtec.net 的 tokenId7。失败返回 None。"""
-    if sys.platform != "win32":
-        return None
-    dbs = _candidate_cookie_dbs()
-    # 预收集所有 Local State，作为跨引擎兜底密钥
+def _decrypt_token_from_dbs(dbs):
+    """从给定 cookie 库列表里解出 tokenId7；用所有 Local State 密钥兜底。"""
     all_ls = []
     for db in dbs:
         ls = _find_local_state(db)
@@ -467,6 +471,13 @@ def read_wechat_tokenid7():
             except Exception:
                 continue
     return None
+
+
+def read_wechat_tokenid7(extra_roots=None):
+    """自动发现并解出本机微信里 kk.xwtec.net 的 tokenId7。失败返回 None。"""
+    if sys.platform != "win32":
+        return None
+    return _decrypt_token_from_dbs(_candidate_cookie_dbs(extra_roots))
 
 
 # ----------------------------------------------------------------------------
@@ -519,18 +530,25 @@ def api_status():
 
 @app.get("/api/token/auto")
 def api_token_auto():
-    """仅本机：从 PC 微信自动读取 tokenId7。"""
+    """仅本机：从 PC 微信自动读取 tokenId7。可选 ?dir= 手动指定微信目录。"""
     ctx = current_ctx()
     if ctx is None:
         return jsonify({"ok": False, "error": "会话已失效，请刷新页面"})
     if not is_local_request():
-        return jsonify({"ok": False, "error": "仅本机可自动读取微信；同事请用助手或手动粘贴"})
+        return jsonify({"ok": False, "error": "仅本机可自动读取微信；同事请各自在自己电脑运行"})
+    manual = request.args.get("dir", "").strip()
+    extra = [manual] if manual else None
     try:
-        tk = read_wechat_tokenid7()
+        dbs = _candidate_cookie_dbs(extra)
+        tk = _decrypt_token_from_dbs(dbs)
     except Exception as e:
         return jsonify({"ok": False, "error": f"读取失败：{e}"})
     if not tk:
-        return jsonify({"ok": False, "error": "本机微信里没找到登录态，请先在电脑微信打开一次绩效/OA 页"})
+        if not dbs:
+            return jsonify({"ok": False, "needDir": True,
+                            "error": "没找到微信数据目录。请在下方手动指定微信目录（见“目录在哪”）。"})
+        return jsonify({"ok": False, "needDir": True,
+                        "error": "找到了微信，但没有绩效登录态。请先用电脑微信打开一次绩效/OA 页再重试。"})
     ctx["tokenId7"] = tk
     info = probe_token(ctx)
     if not info["valid"]:
@@ -646,16 +664,27 @@ PAGE_HTML = r"""<!DOCTYPE html>
         <button id="autoBtn" class="hide" onclick="autoToken()">🟢 从本机微信自动获取</button>
         <span id="autoMsg" class="muted"></span>
       </div>
+      <div id="dirBox" class="hide" style="margin-bottom:8px">
+        <div class="row">
+          <input id="dirInput" placeholder="微信目录（自动读不到时填），如 %APPDATA%\Tencent"/>
+          <button class="ghost" onclick="autoTokenDir()">从该目录读取</button>
+        </div>
+      </div>
       <div class="row">
         <input id="tokenInput" placeholder="或手动粘贴 tokenId7=..."/>
         <button class="ghost" onclick="saveToken()">保存</button>
       </div>
       <details>
-        <summary>说明 / 同事怎么用</summary>
+        <summary>目录在哪？/ 读不到怎么办</summary>
         <div class="muted" style="margin-top:6px">
-          · 绩效登录态(tokenId7)存在电脑微信里，先用<b>电脑微信</b>打开一次绩效或 OA 页，再点“从本机微信自动获取”。<br>
-          · 给同事用：各自在自己电脑上运行本程序（读各自微信）即全自动；或运行随附的
-          <b>kaka_get_token.py</b> 拿到 token 粘贴这里。
+          1. 先用<b>电脑版微信</b>打开过一次绩效 / OA 页（让微信存下登录态），再点“从本机微信自动获取”。<br>
+          2. 还读不到就在上面“微信目录”框里填，然后点“从该目录读取”。默认目录（直接复制）：<br>
+          &nbsp;&nbsp;<code>%APPDATA%\Tencent</code><br>
+          常见完整位置（<code>用户名</code>换成你自己的）：<br>
+          &nbsp;&nbsp;· 新版微信：<code>C:\Users\用户名\AppData\Roaming\Tencent\xwechat\radium\web\profiles</code><br>
+          &nbsp;&nbsp;· 旧版微信：<code>C:\Users\用户名\AppData\Roaming\Tencent\WeChat\xweb</code><br>
+          也可以直接填到那个名为 <code>Cookies</code> 的文件路径。<br>
+          3. 实在不行：运行随附的 <b>kaka_get_token.py</b> 拿到 token，粘到最下面那个框。
         </div>
       </details>
     </div>
@@ -700,7 +729,7 @@ async function boot(){
     $('#setupMsg').textContent = '需要绩效登录态(tokenId7)';
   }
   $('#setupActions').classList.remove('hide');
-  if(IS_LOCAL) $('#autoBtn').classList.remove('hide');
+  if(IS_LOCAL){ $('#autoBtn').classList.remove('hide'); $('#dirBox').classList.remove('hide'); }
 }
 
 function onReady(name){
@@ -714,6 +743,15 @@ function onReady(name){
 async function autoToken(){
   $('#autoMsg').textContent = '读取中…';
   const r = await jget('/api/token/auto');
+  if(r.ok){ onReady(r.name); return; }
+  $('#autoMsg').textContent = r.error || '读取失败';
+  if(r.needDir) $('#dirBox').classList.remove('hide');
+}
+async function autoTokenDir(){
+  const dir = $('#dirInput').value.trim();
+  if(!dir){ $('#autoMsg').textContent='请先填微信目录'; return; }
+  $('#autoMsg').textContent = '读取中…';
+  const r = await jget('/api/token/auto?dir=' + encodeURIComponent(dir));
   if(r.ok){ onReady(r.name); } else { $('#autoMsg').textContent = r.error || '读取失败'; }
 }
 async function saveToken(){

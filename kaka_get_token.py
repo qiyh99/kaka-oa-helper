@@ -69,15 +69,23 @@ _SKIP_DIRS = {"msg", "filestorage", "backup", "cache", "cachefile", "gpucache",
               "crashpad", "blob_storage", "code cache", "dawncache", "shadercache"}
 
 
-def _candidate_cookie_dbs():
+def _candidate_cookie_dbs(extra_roots=None):
     home = os.path.expanduser("~")
-    roots = []
-    for base in (os.environ.get("APPDATA"), os.environ.get("LOCALAPPDATA"),
-                 os.path.join(home, "AppData", "Roaming"),
-                 os.path.join(home, "AppData", "Local")):
+    bases = (os.environ.get("APPDATA"), os.environ.get("LOCALAPPDATA"),
+             os.path.join(home, "AppData", "Roaming"),
+             os.path.join(home, "AppData", "Local"))
+    roots, direct = [], []
+    for base in bases:
         if base:
-            roots.append(os.path.join(base, "Tencent"))
-    dbs, seen = [], set()
+            for brand in ("Tencent", "WeChat", "Weixin", "xwechat"):
+                roots.append(os.path.join(base, brand))
+    for r in (extra_roots or []):
+        p = os.path.normpath(os.path.expandvars(os.path.expanduser(str(r).strip().strip('"'))))
+        if os.path.isfile(p):
+            direct.append(p)
+        elif os.path.isdir(p):
+            roots.append(p)
+    dbs, seen = list(direct), set()
     for root in roots:
         root = os.path.normpath(root)
         if not os.path.isdir(root) or root in seen:
@@ -114,10 +122,10 @@ def _query_token_enc(db_path):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def read_wechat_tokenid7():
+def read_wechat_tokenid7(extra_roots=None):
     if sys.platform != "win32":
         return None
-    dbs = _candidate_cookie_dbs()
+    dbs = _candidate_cookie_dbs(extra_roots)
     all_ls = []
     for db in dbs:
         ls = _find_local_state(db)
@@ -156,14 +164,18 @@ def main():
     except ImportError:
         print("缺少依赖，请先运行：pip install cryptography")
         return
+    # 可选：命令行传入微信目录（自动找不到时用），如
+    #   python kaka_get_token.py "%APPDATA%\Tencent"
+    extra = sys.argv[1:] or None
     try:
-        tk = read_wechat_tokenid7()
+        tk = read_wechat_tokenid7(extra)
     except Exception as e:
         print("读取失败：", e)
         return
     if not tk:
         print("× 没在本机微信里找到绩效登录态。")
-        print("  请先用【电脑版微信】打开一次绩效页（公众号里那个成绩/绩效），再运行本助手。")
+        print("  1) 先用【电脑版微信】打开一次绩效页（公众号里那个成绩/绩效），再运行本助手；")
+        print("  2) 仍不行可手动指定目录：python kaka_get_token.py \"%APPDATA%\\Tencent\"")
         return
     print("\n你的绩效 tokenId7：\n")
     print("   " + tk + "\n")
