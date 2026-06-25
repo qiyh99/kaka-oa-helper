@@ -848,6 +848,18 @@ PAGE_HTML = r"""<!DOCTYPE html>
     <h2>个人绩效</h2>
     <div id="perfBody" class="muted">加载中…</div>
   </div>
+
+  <!-- 工资估算 -->
+  <div id="salary" class="card hide">
+    <h2>工资估算 <span class="muted">税前到手 · 未计个税</span></h2>
+    <div class="row" style="flex-wrap:wrap;gap:14px;align-items:flex-end">
+      <div><div class="muted">工资(基本+满绩效)</div><input id="salaryWage" type="number" style="width:130px" placeholder="如 10000" oninput="calcSalary()"></div>
+      <div><div class="muted">额外补贴</div><input id="salarySub" type="number" style="width:110px" placeholder="如 500" oninput="calcSalary()"></div>
+      <div><div class="muted">绩效分</div><input id="salaryGrade" type="number" style="width:90px" placeholder="最新月" oninput="calcSalary()"></div>
+    </div>
+    <div id="salaryBody" class="muted" style="margin-top:12px">输入工资后自动计算。</div>
+    <div class="muted" style="margin-top:8px">规则：工资含基本(80%)+满绩效(20%)，绩效工资=工资×20%×绩效分%；五险(成都员工)养老8%/医疗2%/失业0.4%按工资计；公积金=工资一半×8%。绩效分默认取最新月绩效，可改；工资/补贴只存在你本机浏览器。</div>
+  </div>
 </div>
 
 <script>
@@ -879,7 +891,54 @@ function onReady(name){
   $('#dash').classList.remove('hide');
   $('#annual').classList.remove('hide');
   $('#perf').classList.remove('hide');
+  $('#salary').classList.remove('hide');
   loadReport(); loadAnnual(); loadPerf();
+}
+
+let LATEST_GRADE = null;
+const money = n => (n<0?'-':'') + '¥' + Math.abs(n).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2});
+function srow(label, val, strong){
+  return '<tr'+(strong?' style="font-weight:700"':'')+'><td>'+label+'</td><td class="r">'+money(val)+'</td></tr>';
+}
+function restoreSalary(){
+  try{
+    const s = JSON.parse(localStorage.getItem('kaka_salary')||'{}');
+    if($('#salaryWage').value==='' && s.wage) $('#salaryWage').value = s.wage;
+    if($('#salarySub').value==='' && s.sub) $('#salarySub').value = s.sub;
+    if($('#salaryGrade').value===''){
+      $('#salaryGrade').value = (s.grade!=null && s.grade!=='') ? s.grade : (LATEST_GRADE!=null?LATEST_GRADE:'');
+    }
+  }catch(e){}
+  calcSalary();
+}
+function calcSalary(){
+  const wage = parseFloat($('#salaryWage').value)||0;
+  const sub = parseFloat($('#salarySub').value)||0;
+  let g = parseFloat($('#salaryGrade').value); if(isNaN(g)) g = 100;
+  try{ localStorage.setItem('kaka_salary', JSON.stringify({wage:$('#salaryWage').value, sub:$('#salarySub').value, grade:$('#salaryGrade').value})); }catch(e){}
+  if(wage<=0){ $('#salaryBody').innerHTML = '<span class="muted">输入工资后自动计算。</span>'; return; }
+  const base = wage*0.8, perf = wage*0.2*(g/100), gross = base+perf+sub;
+  const ylao = wage*0.08, yliao = wage*0.02, shiye = wage*0.004, gjj = wage*0.5*0.08;
+  const wsj = ylao+yliao+shiye+gjj;
+  const net = gross - wsj;
+  $('#salaryBody').innerHTML =
+    '<div class="cards">'
+      + statCard('应发合计', gross, '元')
+      + statCard('五险一金', wsj, '元', 'bad')
+      + statCard('税前到手', net, '元', 'ok')
+    + '</div>'
+    + '<table style="margin-top:10px">'
+      + srow('基本工资 (80%)', base)
+      + srow('绩效工资 (20%×'+g+'%)', perf)
+      + srow('额外补贴', sub)
+      + srow('应发合计', gross, true)
+      + srow('养老保险 8%', -ylao)
+      + srow('医疗保险 2%', -yliao)
+      + srow('失业保险 0.4%', -shiye)
+      + srow('公积金 (工资一半×8%)', -gjj)
+      + srow('五险一金合计', -wsj, true)
+      + srow('税前到手（未计个税）', net, true)
+    + '</table>';
 }
 
 async function autoToken(){
@@ -981,6 +1040,8 @@ async function loadPerf(){
     {t:'最终',r:true,k:'final'}, {t:'自评',r:true,k:'self'}, {t:'初评',r:true,k:'early'}, {t:'终评',r:true,k:'check'}
   ], d.forms);
   $('#perfBody').innerHTML = html;
+  if(d.forms && d.forms.length && d.forms[0].final!=null) LATEST_GRADE = d.forms[0].final;
+  restoreSalary();
 }
 
 boot();
