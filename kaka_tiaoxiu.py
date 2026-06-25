@@ -35,7 +35,7 @@ from flask import Flask, request, jsonify, Response
 # 配置
 # ----------------------------------------------------------------------------
 BASE_NET = "https://kk.xwtec.net"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 PORT = 5666
 MONTHS = 3                          # 统计窗口 & 加班作废周期（月）
 EXPIRE_SOON_DAYS = 7                # “即将到期”提醒阈值（天）
@@ -858,6 +858,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       <div><div class="muted">工资(基本+满绩效)</div><input id="salaryWage" type="number" style="width:130px" placeholder="如 10000" oninput="calcSalary()"></div>
       <div><div class="muted">额外补贴</div><input id="salarySub" type="number" style="width:110px" placeholder="如 500" oninput="calcSalary()"></div>
       <div><div class="muted">绩效分</div><input id="salaryGrade" type="number" style="width:90px" placeholder="最新月" oninput="calcSalary()"></div>
+      <div><div class="muted">五险一金(实缴,选填)</div><input id="salaryWsj" type="number" style="width:120px" placeholder="默认按比例算" oninput="calcSalary()"></div>
       <div><div class="muted">专项附加扣除(月)</div><input id="salarySpecial" type="number" style="width:120px" placeholder="房租/赡养等 如 0" oninput="calcSalary()"></div>
     </div>
     <div id="salaryBody" class="muted" style="margin-top:12px">输入工资后自动计算。</div>
@@ -908,6 +909,7 @@ function restoreSalary(){
     const s = JSON.parse(localStorage.getItem('kaka_salary')||'{}');
     if($('#salaryWage').value==='' && s.wage) $('#salaryWage').value = s.wage;
     if($('#salarySub').value==='' && s.sub) $('#salarySub').value = s.sub;
+    if($('#salaryWsj').value==='' && s.wsj) $('#salaryWsj').value = s.wsj;
     if($('#salarySpecial').value==='' && s.special) $('#salarySpecial').value = s.special;
     if($('#salaryGrade').value===''){
       $('#salaryGrade').value = (s.grade!=null && s.grade!=='') ? s.grade : (LATEST_GRADE!=null?LATEST_GRADE:'');
@@ -928,14 +930,21 @@ function calcSalary(){
   const sub = parseFloat($('#salarySub').value)||0;
   const special = parseFloat($('#salarySpecial').value)||0;
   let g = parseFloat($('#salaryGrade').value); if(isNaN(g)) g = 100;
-  try{ localStorage.setItem('kaka_salary', JSON.stringify({wage:$('#salaryWage').value, sub:$('#salarySub').value, grade:$('#salaryGrade').value, special:$('#salarySpecial').value})); }catch(e){}
+  const wsjIn = parseFloat($('#salaryWsj').value);
+  try{ localStorage.setItem('kaka_salary', JSON.stringify({wage:$('#salaryWage').value, sub:$('#salarySub').value, grade:$('#salaryGrade').value, wsj:$('#salaryWsj').value, special:$('#salarySpecial').value})); }catch(e){}
   if(wage<=0){ $('#salaryBody').innerHTML = '<span class="muted">输入工资后自动计算。</span>'; return; }
   const base = wage*0.8, perf = wage*0.2*(g/100), gross = base+perf+sub;
   const ylao = wage*0.08, yliao = wage*0.02, shiye = wage*0.004, gjj = wage*0.5*0.08;
-  const wsj = ylao+yliao+shiye+gjj;
+  const wsjAuto = ylao+yliao+shiye+gjj;
+  const useActual = !isNaN(wsjIn) && wsjIn>0;
+  const wsj = useActual ? wsjIn : wsjAuto;     // 实缴优先，参与扣税
   const taxable = Math.max(0, gross - wsj - 5000 - special);
   const tax = incomeTax(taxable);
   const net = gross - wsj - tax;
+  const wsjRows = useActual
+    ? srow('五险一金 (实缴)', -wsj, true) + '<tr><td class="muted" colspan="2" style="font-size:12px">（按比例估算约 '+money(wsjAuto)+'）</td></tr>'
+    : srow('养老保险 8%', -ylao) + srow('医疗保险 2%', -yliao) + srow('失业保险 0.4%', -shiye)
+      + srow('公积金 (工资一半×8%)', -gjj) + srow('五险一金合计', -wsj, true);
   $('#salaryBody').innerHTML =
     '<div class="cards">'
       + statCard('应发合计', gross, '元')
@@ -948,14 +957,10 @@ function calcSalary(){
       + srow('绩效工资 (20%×'+g+'%)', perf)
       + srow('额外补贴', sub)
       + srow('应发合计', gross, true)
-      + srow('养老保险 8%', -ylao)
-      + srow('医疗保险 2%', -yliao)
-      + srow('失业保险 0.4%', -shiye)
-      + srow('公积金 (工资一半×8%)', -gjj)
-      + srow('五险一金合计', -wsj, true)
+      + wsjRows
       + srow('减除费用(起征点)', -5000)
       + srow('专项附加扣除', -special)
-      + srow('应纳税所得额', taxable, true)
+      + srow('应纳税所得额 (已减五险一金)', taxable, true)
       + srow('个人所得税', -tax)
       + srow('实发到手', net, true)
     + '</table>';
