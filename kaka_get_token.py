@@ -64,13 +64,13 @@ def _find_local_state(cookie_path):
     return None
 
 
-_SKIP_DIRS = {"msg", "filestorage", "backup", "cache", "cachefile", "gpucache",
-              "temp", "tmp", "video", "image", "img", "emoji", "filecache",
-              "crashpad", "blob_storage", "code cache", "dawncache", "shadercache"}
+_SKIP_DIRS = {"msg", "filestorage", "backup", "video", "image", "img",
+              "emoji", "filecache", "crashpad", "temp", "tmp"}
 
 
 def _candidate_cookie_dbs(extra_roots=None):
     home = os.path.expanduser("~")
+    prof = os.environ.get("USERPROFILE") or home
     bases = (os.environ.get("APPDATA"), os.environ.get("LOCALAPPDATA"),
              os.path.join(home, "AppData", "Roaming"),
              os.path.join(home, "AppData", "Local"))
@@ -79,6 +79,8 @@ def _candidate_cookie_dbs(extra_roots=None):
         if base:
             for brand in ("Tencent", "WeChat", "Weixin", "xwechat"):
                 roots.append(os.path.join(base, brand))
+    roots.append(os.path.join(prof, "Documents", "WeChat Files"))
+    roots.append(os.path.join(prof, "Documents", "xwechat_files"))
     for r in (extra_roots or []):
         p = os.path.normpath(os.path.expandvars(os.path.expanduser(str(r).strip().strip('"'))))
         if os.path.isfile(p):
@@ -154,6 +156,44 @@ def copy_to_clipboard(text):
         return False
 
 
+def _scan_db(db_path):
+    """返回 (是否有tokenId7, 含xwtec的host列表, 总cookie数)。"""
+    tmp = tempfile.mkdtemp()
+    dst = os.path.join(tmp, "c.db")
+    try:
+        shutil.copy(db_path, dst)
+        con = sqlite3.connect(dst)
+        try:
+            xw = con.execute("SELECT DISTINCT host_key,name FROM cookies "
+                             "WHERE host_key LIKE '%xwtec%'").fetchall()
+            total = con.execute("SELECT COUNT(*) FROM cookies").fetchone()[0]
+        finally:
+            con.close()
+        has = any(n == "tokenId7" for _, n in xw)
+        return has, xw, total
+    except Exception as e:
+        return False, [("<打不开>", str(e)[:40])], -1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def diagnose(extra_roots=None):
+    """打印诊断报告：找到了哪些 Cookies 库、各自有没有 xwtec 的 cookie。"""
+    dbs = _candidate_cookie_dbs(extra_roots)
+    print("\n==== 诊断：本机发现的 Cookies 库 ====")
+    if not dbs:
+        print("  未发现任何 Cookies 库。微信可能装在非默认位置。")
+        print("  请手动指定目录再试，例如：python kaka_get_token.py \"D:\\你的\\微信目录\"")
+        return
+    for db in dbs:
+        has, xw, total = _scan_db(db)
+        tag = "★有tokenId7" if has else ("·有xwtec" if xw else "  无关")
+        print(f"  [{tag}] (共{total}条) {db}")
+        for host, name in xw:
+            print(f"        - {host}  {name}")
+    print("\n把以上内容发给作者，即可定位你这台机器微信存登录态的位置。")
+
+
 def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -176,6 +216,7 @@ def main():
         print("× 没在本机微信里找到绩效登录态。")
         print("  1) 先用【电脑版微信】打开一次绩效页（公众号里那个成绩/绩效），再运行本助手；")
         print("  2) 仍不行可手动指定目录：python kaka_get_token.py \"%APPDATA%\\Tencent\"")
+        diagnose(extra)
         return
     print("\n你的绩效 tokenId7：\n")
     print("   " + tk + "\n")

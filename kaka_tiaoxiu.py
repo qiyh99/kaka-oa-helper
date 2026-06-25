@@ -389,16 +389,17 @@ def _find_local_state(cookie_path):
     return None
 
 
-# 扫描时跳过的大目录（聊天记录/缓存/媒体），避免慢和无关
-_SKIP_DIRS = {"msg", "filestorage", "backup", "cache", "cachefile", "gpucache",
-              "temp", "tmp", "video", "image", "img", "emoji", "filecache",
-              "crashpad", "blob_storage", "code cache", "dawncache", "shadercache"}
+# 扫描时跳过的大目录（聊天记录/媒体），避免慢；注意不跳 cache（老版微信 CEF 的
+# Cookies 可能就在 Cache 目录里）。
+_SKIP_DIRS = {"msg", "filestorage", "backup", "video", "image", "img",
+              "emoji", "filecache", "crashpad", "temp", "tmp"}
 
 
 def _candidate_cookie_dbs(extra_roots=None):
     """递归发现本机微信所有 Chromium cookie 库（不依赖固定版本路径）。
     extra_roots：用户手动指定的目录或 Cookies 文件路径（支持 %APPDATA% / ~）。"""
     home = os.path.expanduser("~")
+    prof = os.environ.get("USERPROFILE") or home
     bases = [os.environ.get("APPDATA"), os.environ.get("LOCALAPPDATA"),
              os.path.join(home, "AppData", "Roaming"),
              os.path.join(home, "AppData", "Local")]
@@ -407,6 +408,9 @@ def _candidate_cookie_dbs(extra_roots=None):
         if base:
             for brand in ("Tencent", "WeChat", "Weixin", "xwechat"):
                 roots.append(os.path.join(base, brand))
+    # 老版本可能把数据放在“文档”下
+    roots.append(os.path.join(prof, "Documents", "WeChat Files"))
+    roots.append(os.path.join(prof, "Documents", "xwechat_files"))
     for r in (extra_roots or []):
         p = os.path.normpath(os.path.expandvars(os.path.expanduser(str(r).strip().strip('"'))))
         if os.path.isfile(p):
