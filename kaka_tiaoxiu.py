@@ -35,7 +35,7 @@ from flask import Flask, request, jsonify, Response
 # 配置
 # ----------------------------------------------------------------------------
 BASE_NET = "https://kk.xwtec.net"
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.5.0"
 PORT = 5666
 MONTHS = 3                          # 统计窗口 & 加班作废周期（月）
 EXPIRE_SOON_DAYS = 7                # “即将到期”提醒阈值（天）
@@ -61,7 +61,7 @@ LOCK = threading.Lock()
 
 
 def new_ctx():
-    return {"tokenId7": None, "name": None, "seniority": None}
+    return {"tokenId7": None, "name": None, "seniority": None, "hire": None}
 
 
 def load_sessions():
@@ -71,7 +71,7 @@ def load_sessions():
         data = json.load(open(SESSIONS_FILE, encoding="utf-8"))
         for sid, c in data.items():
             ctx = new_ctx()
-            ctx.update({k: c.get(k) for k in ("tokenId7", "name", "seniority")})
+            ctx.update({k: c.get(k) for k in ("tokenId7", "name", "seniority", "hire")})
             SESSIONS[sid] = ctx
     except Exception:
         pass
@@ -79,7 +79,7 @@ def load_sessions():
 
 def save_sessions():
     with LOCK:
-        dump = {sid: {k: c.get(k) for k in ("tokenId7", "name", "seniority")}
+        dump = {sid: {k: c.get(k) for k in ("tokenId7", "name", "seniority", "hire")}
                 for sid, c in SESSIONS.items() if c.get("tokenId7")}
     with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
         json.dump(dump, f, ensure_ascii=False, indent=2)
@@ -195,7 +195,10 @@ def fetch_oa_list(session, cutoff):
     while True:
         r = session.post(f"{BASE_NET}/vcardoah5/oa/list", data=_list_body(size), timeout=20)
         r.encoding = "utf-8"
-        d = r.json()
+        try:
+            d = r.json()
+        except Exception:
+            break
         common = d.get("common", []) or []
         if not d.get("isMore") or not common or size >= 600:
             break
@@ -344,14 +347,97 @@ def _days_from_fields(fields):
     return 0.0
 
 
-def compute_annual(ctx, seniority=None):
-    """近两年（去年+今年）年假使用情况 + 剩余年假（去年可结转一年）。"""
+def add_years(d, n):
+    try:
+        return d.replace(year=d.year + n)
+    except ValueError:           # 2/29
+        return d.replace(year=d.year + n, day=28)
+
+
+def parse_hire(s):
+    """'2023-10' / '2023-10-08' / '202310' -> date(首日按月初)。失败返回 None。"""
+    digits = re.sub(r"\D", "", s or "")
+    try:
+        if len(digits) >= 8:
+            return date(int(digits[:4]), int(digits[4:6]), int(digits[6:8]))
+        if len(digits) >= 6:
+            return date(int(digits[:4]), int(digits[4:6]), 1)
+    except Exception:
+        return None
+    return None
+
+
+def auto_hire(ctx):
+    """用绩效最早月份当入职月（月初）。取不到返回 None。"""
+    try:
+        perf = fetch_perf(ctx)
+        months = [x["month"] for x in perf.get("forms", []) if x.get("month")]
+        if not months:
+            return None
+        e = min(months)
+        return date(int(e[:4]), int(e[5:7]), 1)
+    except Exception:
+        return None
+
+
+def _year_entitlement(y, hire_date, e_full):
+    """第 y 年的应得年假：入职满1年才有，跨过满1年的那年按剩余天数折算。"""
+    if e_full <= 0 or hire_date is None:
+        return 0.0
+    elig = add_years(hire_date, 1)               # 入职满1年之日起享受
+    y_end = date(y, 12, 31)
+    if y_end < elig:
+        return 0.0
+    days_y = (date(y, 12, 31) - date(y, 1, 1)).days + 1
+    if elig > date(y, 1, 1):                      # elig 落在本年内 -> 折算
+        rem = (y_end - elig).days + 1
+        return round(e_full * rem / days_y, 1)
+    return float(e_full)
+
+
+def _simulate_annual(start_year, this_year, hire_date, e_full, used_by_year):
+    """逐年 FIFO 模拟：休假先消耗结转、再消耗当年；结转只保留 1 年。
+    返回 (years 列表, 当前年汇总 cur)。纯函数，便于测试。"""
+    carry = 0.0
+    years = []
+    cur = {"entitlement": 0.0, "used": 0.0, "carryIn": 0.0, "carryLeft": 0.0,
+           "eLeft": 0.0, "remaining": 0.0}
+    for y in range(start_year, this_year + 1):
+        e_y = _year_entitlement(y, hire_date, e_full)
+        used_y = round(used_by_year.get(y, 0.0), 1)
+        consume_carry = min(carry, used_y)
+        consume_e = min(e_y, used_y - consume_carry)
+        carry_left = round(carry - consume_carry, 1)     # 旧结转，今年底作废
+        e_left = round(e_y - consume_e, 1)
+        if y == this_year:
+            cur = {"entitlement": e_y, "used": used_y, "carryIn": round(carry, 1),
+                   "carryLeft": carry_left, "eLeft": e_left,
+                   "remaining": round(carry_left + e_left, 1)}
+        years.append({"year": y, "entitlement": e_y, "used": used_y,
+                      "carryIn": round(carry, 1),
+                      "carryOut": (e_left if y < this_year else None)})
+        carry = e_left                                   # 仅当年剩余结转到下一年
+    return years, cur
+
+
+def compute_annual(ctx, seniority=None, hire=None):
+    """从入职起逐年模拟年假（FIFO：先用结转、再用当年；结转只保留1年）。"""
     session = net_session(ctx)
     today = date.today()
-    cutoff = date(today.year - 1, 1, 1)     # 覆盖去年、今年两个自然年
+
+    seniority_auto = seniority is None
+    if seniority_auto:
+        seniority = auto_seniority(ctx)
+    e_full = annual_entitlement(seniority) or 0
+
+    hire_auto = hire is None
+    hire_date = parse_hire(hire) if hire else (auto_hire(ctx) if hire_auto else None)
+
+    start_year = hire_date.year if hire_date else (today.year - 1)
+    cutoff = date(start_year, 1, 1)
     records, _ = dedupe(fetch_oa_list(session, cutoff))
 
-    rows = []
+    rows, used_by_year = [], {}
     for it in records:
         if not (it.get("flowId") or "").startswith(ANNUAL_PREFIXES):
             continue
@@ -361,43 +447,23 @@ def compute_annual(ctx, seniority=None):
             ev = parse_dt(fields.get("开始时间") or it.get("applyTime"))
         except Exception:
             ev = parse_dt(it.get("applyTime"))
-        rows.append({
-            "sn": it.get("flowInsSN", ""),
-            "flag": it.get("flowFlag"),
-            "status": FLAG_LABELS.get(it.get("flowFlag"), f"其他({it.get('flowFlag')})"),
-            "date": fmt_date(ev),
-            "_year": ev.year,
-            "days": round(days, 1),
-        })
+        rows.append({"sn": it.get("flowInsSN", ""), "flag": it.get("flowFlag"),
+                     "status": FLAG_LABELS.get(it.get("flowFlag"), f"其他({it.get('flowFlag')})"),
+                     "date": fmt_date(ev), "_year": ev.year, "days": round(days, 1)})
+        if it.get("flowFlag") == FLAG_DONE:
+            used_by_year[ev.year] = round(used_by_year.get(ev.year, 0.0) + days, 1)
     rows.sort(key=lambda x: x["date"], reverse=True)
 
-    auto = seniority is None
-    if auto:
-        seniority = auto_seniority(ctx)
-    entitlement = annual_entitlement(seniority)
-
-    used_this = round(sum(r["days"] for r in rows
-                          if r["flag"] == FLAG_DONE and r["_year"] == today.year), 1)
-    used_last = round(sum(r["days"] for r in rows
-                          if r["flag"] == FLAG_DONE and r["_year"] == today.year - 1), 1)
-    if entitlement is None:
-        last_left = this_left = remaining = None
-    else:
-        last_left = max(0.0, entitlement - used_last)   # 去年结转（今年内有效）
-        this_left = max(0.0, entitlement - used_this)
-        remaining = round(last_left + this_left, 1)
+    years, cur = _simulate_annual(start_year, today.year, hire_date, e_full, used_by_year)
 
     return {
-        "seniority": seniority,
-        "seniorityAuto": auto,
-        "entitlement": entitlement,
-        "thisYear": today.year,
-        "lastYear": today.year - 1,
-        "usedThisYear": used_this,
-        "usedLastYear": used_last,
-        "lastYearLeft": last_left,
-        "thisYearLeft": this_left,
-        "remaining": remaining,
+        "seniority": seniority, "seniorityAuto": seniority_auto,
+        "hire": fmt_date(hire_date) if hire_date else None, "hireAuto": hire_auto,
+        "entitlement": e_full, "thisYear": today.year,
+        "remaining": cur["remaining"],
+        "thisYearEntitlement": cur["entitlement"], "thisYearUsed": cur["used"],
+        "carryInThisYear": cur["carryIn"], "carryLeftThisYear": cur.get("carryLeft", 0.0),
+        "years": [y for y in years if y["entitlement"] > 0 or y["used"] > 0],
         "rows": [{k: v for k, v in r.items() if not k.startswith("_")} for r in rows],
     }
 
@@ -708,7 +774,7 @@ def api_perf():
 
 @app.get("/api/annual")
 def api_annual():
-    """年假：?years=工龄（不传则按绩效推算；传了会记住）。"""
+    """年假：?years=工龄 &hire=入职日期（不传按绩效推算；传了会记住）。"""
     ctx = current_ctx()
     if ctx is None or not ctx.get("tokenId7"):
         return jsonify({"ok": False, "error": "未获取登录态"})
@@ -719,8 +785,15 @@ def api_annual():
             save_sessions()
         except ValueError:
             return jsonify({"ok": False, "error": "工龄请填数字（年）"})
+    hire = request.args.get("hire", "").strip()
+    if hire:
+        if parse_hire(hire) is None:
+            return jsonify({"ok": False, "error": "入职日期格式如 2023-10 或 2023-10-08"})
+        ctx["hire"] = hire
+        save_sessions()
     try:
-        return jsonify({"ok": True, "data": compute_annual(ctx, ctx.get("seniority"))})
+        return jsonify({"ok": True, "data": compute_annual(
+            ctx, ctx.get("seniority"), ctx.get("hire"))})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -835,14 +908,16 @@ PAGE_HTML = r"""<!DOCTYPE html>
   <div id="annual" class="card hide">
     <h2>年假 <span class="muted" id="annualSub"></span></h2>
     <div class="cards" id="annualCards"></div>
-    <div class="row" style="margin-top:10px">
-      <span class="muted">工龄(年)：</span>
-      <input id="seniorityInput" style="width:90px" placeholder="如 3"/>
+    <div class="row" style="margin-top:10px;flex-wrap:wrap;gap:10px;align-items:center">
+      <span class="muted">工龄(年)</span><input id="seniorityInput" style="width:80px" placeholder="如 3"/>
+      <span class="muted">入职日期</span><input id="hireInput" style="width:120px" placeholder="如 2023-10"/>
       <button class="ghost" onclick="recalcAnnual()">重新计算</button>
-      <span class="muted" id="annualHint"></span>
     </div>
-    <div class="muted" style="margin-top:8px">规则：法定年假按工龄 满1年5天 / 满10年10天 / 满20年15天；上一年没休的可结转到今年用，再不休作废（故查近两年）。工龄默认按绩效推算，可手填覆盖。</div>
-    <div id="annualTable" style="margin-top:8px"></div>
+    <div class="muted" style="margin-top:8px">规则：法定年假按工龄 满1年5天 / 满10年10天 / 满20年15天；入职满1年才享受、当年按剩余天数折算；休假先消耗上一年结转、再消耗当年，结转只保留一年。从入职起逐年模拟（见下表），工龄/入职默认按绩效推算，可手填。</div>
+    <div class="muted" style="margin:12px 0 2px">逐年明细</div>
+    <div id="annualYears"></div>
+    <div class="muted" style="margin:12px 0 2px">年假申请</div>
+    <div id="annualTable"></div>
   </div>
 
   <!-- 绩效 -->
@@ -1028,27 +1103,36 @@ async function loadReport(){
   ], d.tiaoxiu);
 }
 
-async function loadAnnual(years){
+async function loadAnnual(years, hire){
   $('#annualCards').innerHTML = '<div class="muted">加载中…</div>';
-  const u = '/api/annual' + (years!=null && years!=='' ? ('?years='+encodeURIComponent(years)) : '');
-  const r = await jget(u);
+  const p = [];
+  if(years!=null && years!=='') p.push('years='+encodeURIComponent(years));
+  if(hire!=null && hire!=='') p.push('hire='+encodeURIComponent(hire));
+  const r = await jget('/api/annual' + (p.length?('?'+p.join('&')):''));
   if(!r.ok){ $('#annualCards').innerHTML = '<div class="muted">加载失败：'+r.error+'</div>'; return; }
   const d = r.data;
-  $('#annualSub').textContent = '工龄约 ' + (d.seniority==null?'—':d.seniority) + ' 年'
-    + (d.seniorityAuto?'（按绩效推算，可改）':'（手填）') + ' · 每年应休 '
-    + (d.entitlement==null?'—':d.entitlement) + ' 天';
+  $('#annualSub').textContent = '入职 ' + (d.hire||'—') + (d.hireAuto?'(推算)':'')
+    + ' · 工龄约 ' + (d.seniority==null?'—':d.seniority) + ' 年' + (d.seniorityAuto?'(推算)':'')
+    + ' · 满额每年 ' + (d.entitlement||0) + ' 天';
   $('#annualCards').innerHTML =
       statCard('剩余年假', d.remaining, '天', 'ok')
-    + statCard(d.thisYear+' 已休', d.usedThisYear, '天')
-    + statCard(d.lastYear+' 已休', d.usedLastYear, '天')
-    + statCard('去年结转剩余', d.lastYearLeft, '天', d.lastYearLeft>0?'warn':'');
+    + statCard('今年应得', d.thisYearEntitlement, '天')
+    + statCard('今年已休', d.thisYearUsed, '天')
+    + statCard('去年结转', d.carryInThisYear, '天', d.carryLeftThisYear>0?'warn':'');
   if($('#seniorityInput').value==='' && d.seniority!=null) $('#seniorityInput').value = d.seniority;
+  if($('#hireInput').value==='' && d.hire) $('#hireInput').value = d.hire;
+  $('#annualYears').innerHTML = table([
+    {t:'年份',k:'year'}, {t:'应得',r:true,render:r=>fx(r.entitlement)+'天'},
+    {t:'已休',r:true,render:r=>fx(r.used)+'天'},
+    {t:'年初结转',r:true,render:r=>fx(r.carryIn)+'天'},
+    {t:'结转下年',r:true,render:r=>r.carryOut==null?'—':fx(r.carryOut)+'天'}
+  ], d.years);
   $('#annualTable').innerHTML = table([
     {t:'年假日期',k:'date'}, {t:'单号',k:'sn'}, {t:'状态',render:statusPill},
     {t:'天数',r:true,render:r=>fx(r.days)+'天'}
   ], d.rows);
 }
-function recalcAnnual(){ loadAnnual($('#seniorityInput').value.trim()); }
+function recalcAnnual(){ loadAnnual($('#seniorityInput').value.trim(), $('#hireInput').value.trim()); }
 
 async function loadPerf(){
   $('#perfBody').innerHTML = '加载中…';
